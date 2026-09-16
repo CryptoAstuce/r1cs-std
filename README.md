@@ -1,3 +1,7 @@
+## Parcours français
+
+Un parcours pédagogique en français présente les allocations R1CS, les gadgets booléens et arithmétiques, les comparaisons, conversions et composants cryptographiques de r1cs-std. Voir [docs/fr/README.md](docs/fr/README.md).
+
 <h1 align="center">ark-r1cs-std</h1>
 
 <p align="center">

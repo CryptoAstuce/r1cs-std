@@ -686,6 +686,11 @@ impl<TargetF: PrimeField, BaseF: PrimeField> ToBytesGadget<BaseF>
     #[tracing::instrument(target = "gr1cs")]
     fn to_bytes_le(&self) -> R1CSResult<Vec<UInt8<BaseF>>> {
         let mut bits = self.to_bits_le()?;
+        // `to_bits_le` returns `num_limbs * bits_per_limb` bits, which can exceed
+        // `TargetF::BigInt::NUM_LIMBS * 64` (e.g. 20 limbs of 13 bits for a 256-bit
+        // target emulated in BN254's `Fr`). It also constrains every bit at or
+        // above `MODULUS_BIT_SIZE` to zero, so those bits can be dropped.
+        bits.truncate(TargetF::MODULUS_BIT_SIZE as usize);
 
         let num_bits = TargetF::BigInt::NUM_LIMBS * 64;
         assert!(bits.len() <= num_bits);
@@ -923,16 +928,60 @@ impl<TargetF: PrimeField, BaseF: PrimeField> Clone for AllocatedEmulatedFpVar<Ta
 #[cfg(test)]
 mod test {
     use ark_ec::{bls12::Bls12Config, pairing::Pairing};
-    use ark_ff::PrimeField;
-    use ark_relations::gr1cs::ConstraintSystem;
+    use ark_ff::{BigInteger, PrimeField};
+    use ark_relations::gr1cs::{ConstraintSystem, OptimizationGoal};
 
     use crate::{
         alloc::AllocVar,
+        convert::ToBytesGadget,
         fields::{
-            emulated_fp::{test::check_constraint, AllocatedEmulatedFpVar},
+            emulated_fp::{
+                params::{get_params, OptimizationType},
+                test::check_constraint,
+                AllocatedEmulatedFpVar,
+            },
             fp::FpVar,
         },
+        GR1CSVar,
     };
+
+    // Regression test for #217: `to_bytes_le` asserted that the limb
+    // decomposition fits in `TargetF::BigInt::NUM_LIMBS * 64` bits, which is
+    // false when `num_limbs * bits_per_limb` rounds past it. With a
+    // weight-optimized constraint system, BN254's `Fq` in BN254's `Fr` uses
+    // 6 limbs of 43 bits (258 bits) for a 254-bit modulus stored in 256 bits.
+    #[test]
+    fn to_bytes_le_when_limbs_exceed_bigint_bits() {
+        type TargetF = ark_bn254::Fq;
+        type BaseF = ark_bn254::Fr;
+
+        let params = get_params(
+            TargetF::MODULUS_BIT_SIZE as usize,
+            BaseF::MODULUS_BIT_SIZE as usize,
+            OptimizationType::Weight,
+        );
+        let num_bits = <TargetF as PrimeField>::BigInt::NUM_LIMBS * 64;
+        assert!(params.num_limbs * params.bits_per_limb > num_bits);
+
+        for value in [
+            TargetF::from(0u8),
+            TargetF::from(123u64),
+            -TargetF::from(1u8),
+        ] {
+            let cs = ConstraintSystem::<BaseF>::new_ref();
+            cs.set_optimization_goal(OptimizationGoal::Weight);
+
+            let var =
+                AllocatedEmulatedFpVar::<TargetF, BaseF>::new_witness(cs.clone(), || Ok(value))
+                    .unwrap();
+            let bytes = var.to_bytes_le().unwrap();
+
+            let expected = value.into_bigint().to_bytes_le();
+            assert_eq!(bytes.len(), expected.len());
+            assert_eq!(bytes.value().unwrap(), expected);
+            assert!(cs.is_satisfied().unwrap());
+        }
+    }
 
     #[test]
     fn pr_157() {

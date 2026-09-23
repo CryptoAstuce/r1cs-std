@@ -12,6 +12,7 @@
 
 - [\#156](https://github.com/arkworks-rs/r1cs-std/pull/156) Fix panic in `impl Sum for FpVar`
 - [\#198](https://github.com/arkworks-rs/r1cs-std/pull/198) Remove duplicate native cases in run_binary_exhaustive_both
+- [\#218](https://github.com/arkworks-rs/r1cs-std/pull/218) Fix panic in `EmulatedFpVar::to_bytes_le` when the limb decomposition spans more bits than `TargetF::BigInt`
 
 ## v0.5.0
 

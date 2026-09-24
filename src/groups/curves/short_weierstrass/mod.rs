@@ -425,6 +425,33 @@ where
             let t = &g.x * (x2 + &z2 * a);
 
             g.z.mul_equals(&(y2 - z2 * b), &t)?;
+
+            // With `Z = 0`, the equation above forces `X = 0` but leaves `Y`
+            // free, so it also accepts `(0, 0, 0)`. That triple is not a
+            // projective point: `value()` decodes it as the identity, but the
+            // complete addition formulas map `(0, 0, 0) + P` to `(0, 0, 0)`.
+            // The identity is always allocated as `(0, 1, 0)`, so require
+            // `Y = 1` whenever `Z = 0`, with two constraints:
+            //
+            //     Z * z_inv = 1 - z_is_zero
+            //     (Y - 1) * z_is_zero = 0
+            //
+            // If `Z = 0`, the first one forces `z_is_zero = 1`, and the second
+            // one then forces `Y = 1`. Otherwise, `z_inv = 1 / Z` and
+            // `z_is_zero = 0` satisfy both.
+            let cs = g.cs();
+            let z_is_zero = F::new_witness(ark_relations::ns!(cs, "z_is_zero"), || {
+                Ok(if g.z.value()?.is_zero() {
+                    P::BaseField::one()
+                } else {
+                    P::BaseField::zero()
+                })
+            })?;
+            let z_inv = F::new_witness(ark_relations::ns!(cs, "z_inv"), || {
+                Ok(g.z.value()?.inverse().unwrap_or_else(P::BaseField::zero))
+            })?;
+            g.z.mul_equals(&z_inv, &(F::one() - &z_is_zero))?;
+            (&g.y - P::BaseField::one()).mul_equals(&z_is_zero, &F::zero())?;
         }
         Ok(g)
     }
@@ -985,7 +1012,7 @@ where
 #[cfg(test)]
 mod test_sw_curve {
     use crate::{
-        alloc::AllocVar,
+        alloc::{AllocVar, AllocationMode},
         convert::ToBitsGadget,
         eq::EqGadget,
         fields::{emulated_fp::EmulatedFpVar, fp::FpVar},
@@ -995,7 +1022,7 @@ mod test_sw_curve {
         short_weierstrass::{Projective, SWCurveConfig},
         CurveGroup,
     };
-    use ark_ff::PrimeField;
+    use ark_ff::{One, PrimeField};
     use ark_relations::gr1cs::{ConstraintSystem, Result};
     use ark_std::UniformRand;
     use num_traits::Zero;
@@ -1028,6 +1055,80 @@ mod test_sw_curve {
         point_out.enforce_equal(&mul)?;
 
         cs.is_satisfied()
+    }
+
+    // Allocates the identity, which is represented as `(0, 1, 0)`, then lets
+    // `tamper` rewrite the witnesses created by that allocation (starting with
+    // `x`, `y` and `z`) as a malicious prover could. Returns whether the
+    // constraint system still accepts the modified assignment.
+    fn tampered_identity_witness_satisfied<G>(
+        tamper: impl FnOnce(&mut [G::BaseField]),
+    ) -> Result<bool>
+    where
+        G: CurveGroup,
+        G::BaseField: PrimeField,
+        G::Config: SWCurveConfig,
+    {
+        let cs = ConstraintSystem::<G::BaseField>::new_ref();
+        let start = cs.num_witness_variables();
+        let _point =
+            ProjectiveVar::<G::Config, FpVar<G::BaseField>>::new_variable_omit_prime_order_check(
+                cs.clone(),
+                || Ok(Projective::<G::Config>::zero()),
+                AllocationMode::Witness,
+            )?;
+        let end = cs.num_witness_variables();
+        assert!(cs.is_satisfied()?);
+
+        cs.finalize();
+        {
+            let mut cs = cs.borrow_mut().unwrap();
+            tamper(&mut cs.assignments.witness_assignment[start..end]);
+            // Drop the cached linear-combination values so that they are
+            // recomputed from the modified witness.
+            cs.assignments.lc_assignment.clear();
+        }
+        cs.is_satisfied()
+    }
+
+    fn check_all_zero_projective_witness_is_rejected<G>()
+    where
+        G: CurveGroup,
+        G::BaseField: PrimeField,
+        G::Config: SWCurveConfig,
+    {
+        // Control: changing `y` alone breaks the `y * y` constraint of the
+        // on-curve check, so the harness does see modified witnesses.
+        assert!(
+            !tampered_identity_witness_satisfied::<G>(|w| w[1] = G::BaseField::zero()).unwrap()
+        );
+
+        // #216: setting every witness of the allocation to zero gives the point
+        // `(0, 0, 0)` with consistent squares. `value()` decodes it as the
+        // identity, but it absorbs every point under the complete addition
+        // formulas, so it must not be accepted.
+        assert!(!tampered_identity_witness_satisfied::<G>(|w| {
+            w.iter_mut().for_each(|v| *v = G::BaseField::zero())
+        })
+        .unwrap());
+
+        // Same, but with the `z_is_zero` witness (the second-to-last one) set to
+        // one, which is the only value compatible with `Z = 0`.
+        assert!(!tampered_identity_witness_satisfied::<G>(|w| {
+            w.iter_mut().for_each(|v| *v = G::BaseField::zero());
+            let n = w.len();
+            w[n - 2] = G::BaseField::one();
+        })
+        .unwrap());
+    }
+
+    #[test]
+    fn test_all_zero_projective_witness_is_rejected() {
+        check_all_zero_projective_witness_is_rejected::<ark_bls12_381::G1Projective>();
+        check_all_zero_projective_witness_is_rejected::<ark_pallas::Projective>();
+        check_all_zero_projective_witness_is_rejected::<ark_mnt4_298::G1Projective>();
+        check_all_zero_projective_witness_is_rejected::<ark_mnt6_298::G1Projective>();
+        check_all_zero_projective_witness_is_rejected::<ark_bn254::G1Projective>();
     }
 
     #[test]

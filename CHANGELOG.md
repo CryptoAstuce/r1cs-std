@@ -12,6 +12,7 @@
 
 - [\#156](https://github.com/arkworks-rs/r1cs-std/pull/156) Fix panic in `impl Sum for FpVar`
 - [\#198](https://github.com/arkworks-rs/r1cs-std/pull/198) Remove duplicate native cases in run_binary_exhaustive_both
+- [\#219](https://github.com/arkworks-rs/r1cs-std/pull/219) Reject the all-zero projective point when allocating short Weierstrass `ProjectiveVar`s
 
 ## v0.5.0
 
